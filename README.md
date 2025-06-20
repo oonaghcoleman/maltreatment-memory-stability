@@ -4,7 +4,7 @@ Here you can find the script and dataset to conduct the analyses for the paper "
 
 # Script
 
-The annotated script for the main analyses (in .Rmd format) is in the file "[stability_meta-analysis_script_250620](https://github.com/oonaghcoleman/maltreatment-memory-stability/blob/main/stability_meta_analysis_script_250620.Rmd])"
+The annotated script for the main analyses (in .Rmd format) is in the file "[stability_meta-analysis_script_250620.Rmd]("https://github.com/oonaghcoleman/maltreatment-memory-stability/blob/main/stability_meta_analysis_script_250620.Rmd)".
 
 # Dataset
 
