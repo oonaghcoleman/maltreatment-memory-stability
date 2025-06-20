@@ -1,0 +1,2255 @@
+---
+title: "Stability of self reports of maltreatment"
+author: "Oonagh Coleman"
+date: "2025-03-31"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, results="hide", message=FALSE, warning=FALSE, dpi=300)
+```
+
+# Load packages
+```{r,echo=TRUE, results='hide', message=FALSE, warning=FALSE}
+library(readxl) # read in Excel data
+library(psych) # for description of data
+library(metafor) # for meta-analysis
+library(MAd) # for aggregating effect sizes within studies
+library(dplyr) # for data wrangling
+library(effectsize) # for effect size conversions
+library(ggplot2) # for plots
+library(gridExtra) # for arranging plots
+library(cowplot) # for arranging plots
+library(forcats) # for handling categorical variables
+library(mgsub) # for formatting strings
+library(multcomp) # for pairwise comparisons
+library(kableExtra) # for tables
+library(plyr) # for renaming variables
+library(ggpubr) # for arranging plots
+library(DescTools) # for descriptive statistics, graphical tools etc
+library(tidyr) # for tidying data
+```
+
+```{r,echo=FALSE, results='hide', message=FALSE, warning=FALSE}
+## Define paths for working directories
+Data <- "/Users/k21108435/Library/CloudStorage/OneDrive-King'sCollegeLondon/PhD/Intra-rater/analysis/Data"
+Figures <- "/Users/k21108435/Library/CloudStorage/OneDrive-King'sCollegeLondon/PhD/Intra-rater/analysis/Figures"
+Tables <- "/Users/k21108435/Library/CloudStorage/OneDrive-King'sCollegeLondon/PhD/Intra-rater/analysis/Tables"
+```
+
+
+# Load data 
+```{r}
+## Open dataset 
+setwd(Data)
+data <- data.frame(read_excel("data_extraction_table.xlsx"))
+str(data)
+
+options(scipen = 999)
+
+```
+
+# Examine raw effect sizes
+```{r}
+# Examine types of effect sizes
+table(data$ES_type) 
+
+## View studies with tetrachoric correlations
+data %>% dplyr::filter (ES_type=="tetrachoric") %>% 
+  dplyr::select(author, ES_type, ES)
+
+## View studies with ICC
+data %>% dplyr::filter (ES_type=="ICC") %>% 
+  dplyr::select(author, ES_type, ES)
+
+## View studies with correlation
+data %>% dplyr::filter (ES_type=="correlation") %>% 
+  dplyr::select(author, ES_type, ES)
+
+## View studies with other ES type
+data %>% dplyr::filter(!ES_type %in% c("ICC", "correlation", "tetrachoric")) %>% 
+  dplyr::select(author, ES_type, ES)
+
+## Exclude studies and rows with duplicates or unsupported ES types or duplicates
+data <- data %>%
+  filter(ES_type %in% c("ICC", "correlation", "tetrachoric")) %>%
+  filter(!(author == "Fergusson" & year == "2000")) %>%        #duplicate
+  filter(!(author %in% c("Dubowitz"))) %>%                     #looking at new exposure
+  filter(!(author == "Hosang" & ES_type == "tetrachoric"))     #duplicate
+
+```
+
+# Derive additional variables needed for meta-analysis
+
+Before moving onto analysing the results, we will derive the following variables:
+
+* study reference (combining the author name and year of publication)
+* effect size ID (needed for multi-level meta-analysis models)
+* type of child maltreatment (for moderation analyses)
+* broad dimension of child maltreatment (for moderation analyses)
+* binary baseline age variable (for moderation analysis)
+
+
+```{r}
+# Derive study reference, combining author name and year of publication
+data$ref <- paste0(data$author, "_", data$year)
+
+# Derive effect size ID (this is needed for multi-level meta-analysis)
+data$es_id <- 1:nrow(data)
+
+# Recode maltreatment type variable to reduce number of categories
+table(data$exposure_type)
+# Note: there are only 3 effect sizes for neglect 
+# recode neglect to physical neglect
+data$exposure_type[data$exposure_type=="neglect"] <- "physical_neglect"
+
+table(data$exposure_type)
+
+# Derive broad dimension variable (abuse vs neglect)
+data <- data %>%
+  mutate(dimension = case_when(
+    exposure_type %in% c("sexual_abuse", "physical_abuse", "emotional_abuse") ~ "abuse",
+    exposure_type %in% c("emotional_neglect", "physical_neglect") ~ "neglect",
+    exposure_type %in% c("maltreatment", "ACEs") ~ NA_character_
+  ))
+
+table(data$dimension)
+
+# baseline age - binary variable 
+data$baseline_age_binary <- cut(data$baseline_age, 
+                             breaks = c(0, 18, 70),
+                             labels = c("0-18", "18+"),  # Labels
+                      right = FALSE)
+
+table(data$baseline_age_binary)
+
+```
+
+# Z-transformation and variance calulation
+
+Z-transformation of correlation effect sizes, and calculation of corresponding variance using the 'escalc' function 
+
+```{r}
+
+# Convert effect size column to numeric
+data$ES <- as.numeric(as.character(data$ES))
+
+is.numeric(data$ES)
+
+
+# Check for NA values introduced during conversion
+sum(is.na(data$ES))
+
+
+# Z-transformation
+data <- escalc(measure="ZCOR", ri=ES, ni=followup_n,
+              data=data)
+
+
+# Identify rows with NA values in yi or vi
+na_rows <- which(is.na(data$yi) | is.na(data$vi))
+
+
+```
+
+# Results
+
+## Search results - descriptives
+
+We will calculate descriptives on the number of studies, number of cohorts, baseline sample size, follow up sample size, and sample characteristics (percentage female, attrition, baseline age, follow up age, time interval).
+
+```{r}
+# Number of studies
+k_studies <- data %>%   
+  group_by(ref) %>% # group by study reference
+  dplyr::summarise(m = max(ref)) %>%  # select one row per study 
+  nrow() # count number of rows
+k_studies
+
+# Number of cohorts 
+n_cohort <- data %>%   
+  group_by(cohort) %>% # group by study cohort
+  dplyr::summarise(m = max(cohort)) %>%  # select one row per study 
+  nrow() # count number of rows
+n_cohort
+
+# NOTE - the number of studies is 47 and the number of cohorts is 47, but there are actually two cohorts in one study, and one cohort across two studies
+
+# Obtain total baseline N -
+baseline_N <- data %>%   
+  group_by(cohort) %>%   
+  dplyr::summarise(m = max(baseline_n)) %>%  # make new column indexing largest sample size per distinct cohort
+  dplyr::summarise(sum = sum(m),
+                   min = min(m),
+                   max = max(m)) # sum sample sizes across distinct cohorts
+baseline_N
+
+# Obtain total followup N -
+followup_N <- data %>%   
+  group_by(cohort) %>%   
+  dplyr::summarise(m = max(followup_n)) %>%  # make new column indexing largest sample size per distinct cohort
+  dplyr::summarise(sum = sum(m),
+                   min = min(m),
+                   max = max(m)) # sum sample sizes across distinct cohorts
+followup_N
+
+# Average proportion female 
+perc_female <- data %>%   
+  group_by(cohort) %>% # group by study cohort
+  dplyr::summarise(mean_perc_female = mean(percent_female)) %>%  # calculate the average % female per cohort
+  dplyr::summarise(overall=mean(mean_perc_female, na.rm=TRUE),
+                   min_perc_female = min(mean_perc_female, na.rm = TRUE), 
+                   max_perc_female = max(mean_perc_female, na.rm = TRUE))
+
+perc_female 
+
+# Average attrition
+perc_attrition <- data %>%   
+  group_by(cohort) %>% # group by study cohort
+  dplyr::summarise(mean_perc_attrition = mean(attrition)) %>%  # calculate the average % female per cohort
+  dplyr::summarise(overall=mean(mean_perc_attrition, na.rm=TRUE),
+                   min_attrition = min(mean_perc_attrition, na.rm = TRUE), 
+                   max_attrition = max(mean_perc_attrition, na.rm = TRUE)) 
+perc_attrition
+
+# Age at baseline assessment 
+base_age <- data %>%   
+  group_by(cohort) %>%   # group by study cohort
+  dplyr::summarise(mean_baseline_age = mean(baseline_age)) %>% # calculate the average age at assessment per cohort
+  dplyr::summarise(overall=mean(mean_baseline_age, na.rm=TRUE),
+                   min_base_age = min(mean_baseline_age, na.rm = TRUE), 
+                   max_base_age = max(mean_baseline_age, na.rm = TRUE), 
+                   med_base_age = median(mean_baseline_age, na.rm = TRUE)) # calculate the average age at assessment across cohorts
+base_age
+
+#Age at followup assessment 
+followup_age <- data %>%   
+  group_by(cohort) %>%   # group by study cohort
+  dplyr::summarise(mean_followup_age = mean(followup_age)) %>% # calculate the average age at assessment per cohort
+  dplyr::summarise(overall=mean(mean_followup_age, na.rm=TRUE),
+                   min_followup_age = min(mean_followup_age, na.rm = TRUE), 
+                   max_followup_age = max(mean_followup_age, na.rm = TRUE)) # calculate the average age at assessment across cohorts 
+followup_age
+
+#follow up time period 
+followup_interval <- data %>%   
+  group_by(cohort) %>%   # group by study cohort
+  dplyr::summarise(mean_followup_interval = mean(followup_interval)) %>% # calculate the average age at assessment per cohort
+  dplyr::summarise(overall=mean(mean_followup_interval, na.rm=TRUE),
+                   min_followup_interval = min(mean_followup_interval, na.rm = TRUE), 
+                   max_followup_interval = max(mean_followup_interval, na.rm = TRUE)) # calculate the average age at assessment across cohorts 
+followup_interval
+
+```
+
+## Meta-analyses on the stability of maltreatment reports
+
+In the next section we will: 
+* conduct a multi-level random effects meta-analysis for the stability of retrospective self-reports over time 
+* calculate $I^{2}$ value
+* create a forest plot showing study-average effect sizes
+
+```{r}
+
+# Basic model: random effects for effect size ID and reference
+res <- rma.mv(yi, vi, random = list(~1 | es_id, ~1 | ref), data = data)
+
+# Extended model: also includes cohort-level random effects
+res1 <- rma.mv(yi, vi, random = list(~1 | es_id, ~1 | ref, ~1 | cohort), data = data)
+
+# Compare models to test whether adding cohort improves fit
+anova(res, res1)  # No significant difference → retain simpler model
+
+# Back-transform overall effect estimate and confidence intervals from Z to r
+transf.ztor(res$beta)    # Point estimate
+transf.ztor(res$ci.lb)   # Lower bound
+transf.ztor(res$ci.ub)   # Upper bound
+
+
+# Sum of variance components across levels (for use in R² calculation)
+tau2_res <- sum(res$sigma2)
+
+
+# Calculate I2 statistic
+#see: https://www.metafor-project.org/doku.php/tips:i2_multilevel_multivariate 
+# Create the weight matrix W
+W <- diag(1/data$vi[!is.na(data$yi) & !is.na(data$vi)])
+
+# Create the model matrix X
+X <- model.matrix(res)
+
+# Calculate the projection matrix P
+P <- W - W %*% X %*% solve(t(X) %*% W %*% X) %*% t(X) %*% W
+
+# Calculate the I² statistic
+I2 <- 100 * sum(res$sigma2) / (sum(res$sigma2) + 
+                                           (res$k - res$p) / sum(diag(P)))
+
+# Round the I² statistic to 2 decimal places
+round(I2, 2)
+
+
+```
+
+### Make forest plots with study-average effect sizes
+
+Here we create forest plots for all meta-analyses. Because there are too many effect sizes to show, we show the average effect size per study. We first define functions to derive a single averaged effect size per study and format results, and then plot results for each measure/analysis type.  
+
+#### Define function to format results
+```{r}
+## Define function to format dataframe with study-average effect sizes
+format_agg_df <- function(agg_results) {
+  
+  ## Derive dataset with each study reference represented only once
+  agg_results <- as.data.frame((agg_results) %>% group_by(ref) %>% filter(row_number() == 1))
+  agg_results$es_id <- 1:nrow(agg_results) # Derive effect size ID variable
+  agg_results$year <- sapply(strsplit(agg_results$ref, "_"), `[`, 2) # Derive author variable
+  agg_results$author <- sapply(strsplit(agg_results$ref, "_"), `[`, 1) # Derive year of publication variable
+  
+  # Order dataset according to year of publication
+  agg_results <- agg_results[order(agg_results$year, agg_results$author), ]
+  
+  # Derive correct author labels
+  agg_results$ref_r <- paste0(agg_results$author, " et al. (", agg_results$year, ")")
+  
+  
+  return(agg_results)
+}
+```
+
+
+#### Run aggregated results 
+
+```{r}
+
+data$nesting_var <- ave(data$yi, data$ref, FUN = seq_along) # derive a nesting variable numbering each ES in each study
+data %>%  group_by(ref) %>% dplyr::select(nesting_var) %>% print(n=400) # show nesting variable
+data$DupCheck <- paste0(data$ref) 
+data$DupCheck
+vecUniqueEst <- levels(as.factor(data$DupCheck))
+vecUniqueEst
+listAllSample=list() # make a list to store the results in
+
+# Run loop to aggregate multiple within-study effect size estimates into a single average
+for ( i in 1:length(vecUniqueEst) ) {
+  df_selected = subset(data, DupCheck==as.character(vecUniqueEst[i])) 
+  
+  # If there are multiple effect sizes included in the study, run the aggregate model to obtain a study-average effect
+  if  ( ( length(df_selected$nesting_var)>1 )==TRUE) {
+    print("run aggregate model")
+    agg <- agg(id=ref, es=yi, var=vi, cor=0.6, data=df_selected)
+    df_out <- data.frame(ref=df_selected$ref, 
+                         cohort=df_selected$cohort, 
+                         N=df_selected$followup_n,
+                         ES=agg$es, 
+                         var=agg$var, 
+                         se=sqrt(agg$var))
+  }
+  
+  # If there is only 1 effect size included in the study, keep the original effect size estimate
+  else {
+    print("keep individual effect size estimate")
+    df_out <- data.frame(ref=df_selected$ref, 
+                         cohort=df_selected$cohort,
+                         N=df_selected$followup_n,
+                         ES=df_selected$yi, 
+                         var=df_selected$vi, 
+                         se=sqrt(df_selected$vi))
+  }
+  listAllSample[[i]]=df_out
+}
+datMeta_inc = do.call(rbind,listAllSample)
+
+# Format dataframe
+agg <- format_agg_df(datMeta_inc)
+
+# Verify the presence of ref_r in agg
+print(agg)
+
+# Run meta-analysis on aggregated sample 
+agg_meta <- rma(ES, var, data = agg, slab = agg$ref_r)
+agg_meta
+
+predict(agg_meta, transf=transf.ztor, digits=2) 
+
+agg$ref_r
+
+print(agg)
+
+sum(is.na(agg$ES))  # Check for NA in effect sizes
+sum(is.na(agg$var))
+
+
+```
+
+
+
+
+#### Forest plots 
+
+
+```{r, fig.width=10,  fig.height=10}
+
+# For saving the figure, remove # from below lines
+
+#setwd(Figures)
+#png("meta_forest_all.png", width = 8000, height = 10100, res = 900)
+
+
+agg$r     <- transf.ztor(agg$ES)
+agg$ci_lb <- transf.ztor(agg$ES - 1.96 * agg$se)
+agg$ci_ub <- transf.ztor(agg$ES + 1.96 * agg$se)
+
+summary_r <- transf.ztor(agg_meta$b)
+summary_lb <- transf.ztor(agg_meta$ci.lb)
+summary_ub <- transf.ztor(agg_meta$ci.ub)
+
+#png("forest_plot.png", width = 9, height = 1 + 0.2 * (nrow(agg) +1), , units = "in", res = 300)
+forest.default(
+  x = agg$r,
+  ci.lb = agg$ci_lb,
+  ci.ub = agg$ci_ub,
+  xlim = c(-0.45, 1.3),                # reserve space on the left for labels
+  alim = c(0, 1),                     # axis limits for correlation
+  at = seq(0, 1, 0.2),                # axis ticks
+  xlab = "Correlation",
+  slab = agg$ref_r,
+  efac = 1.5,
+  pch = 19,
+  cex = 0.9,
+  refline=NA
+)
+#add headers
+header_y <- length(agg$r) + 1.5  
+
+text(-0.45, header_y, "Reference", pos = 4, font = 2, cex = 0.95)
+text(0.97,  header_y, "Correlation (95% CI)", pos = 4, font = 2, cex = 0.95)  
+# Add polygon for pooled effect size at the bottom
+addpoly(x = summary_r, ci.lb = summary_lb, ci.ub = summary_ub,
+        mlab = "Pooled effect size", col = "black",  row=-0.8)
+
+# Close graphics device if saving plot
+#dev.off
+
+
+```
+
+
+## Sensitivity analyses
+
+Below we will run sensitivity analyses to test for publication bias and the undue influence of individual studies.
+
+### Publication bias analyses
+
+To test for publication bias, we use the following analyses:
+
+* Egger's test
+* Visual inspection of funnel plots
+
+
+#### Egger's test
+```{r}
+
+rma.mv(yi, vi,  mod = vi, 
+       random=list(~ 1 | es_id, ~ 1 | ref), data=data)
+
+```
+
+#### Funnel plots
+```{r, fig.width=10,  fig.height=10}
+#### Create funnel plots #####
+## Colour code by paper
+
+#Save to PDF (remove hashtags)
+#setwd(Figures)
+
+# Open PDF device with 7x10 inches dimensions
+pdf("funnel_plot.pdf", width = 12, height = 8)
+
+
+cols <- palette.colors(length(unique(data$ref)), palette="polychrome")
+cols <- cols[as.numeric(factor(data$ref))]
+par(mfrow = c(1, 1))
+
+fun <- funnel(res, col=cols, atransf=transf.ztor, xlab="Correlation", main = "Funnel Plot")
+
+#dev.off()
+
+
+```
+
+
+
+### Leave-one-out analyses 
+```{r, eval=FALSE}
+#--------------------------------------------------------------------------------------------------------#
+#------------------ Exclude each PAPER in turn to test overall meta-analytic effect ---------------------#
+#--------------------------------------------------------------------------------------------------------#
+groupids <- unique(data$ref)  # generate groupid variable indexing each unique paper name
+leave1out_study <- matrix(rep(NA, length(groupids)), ncol=5, nrow=length(groupids)) # generate matrix to hold results 
+
+for(i in 1:length(groupids)) {  
+  dataexcl <- subset(data, ref!=groupids[i])  # remove each paper in turn 
+  N_rows <- psych::describe(dataexcl$n)$n # extract the number of rows when each paper is removed
+  mean_N <- psych::describe(dataexcl$n)$mean # extract the mean sample size when each paper is removed
+  
+  # Run meta-analyses
+  res <- rma.mv(yi, vi, random=list(~ 1 | es_id, ~ 1 | ref), data=dataexcl) 
+  
+  # Put results into matrix
+  leave1out_study[i,1] <- i # paper number excluded
+  leave1out_study[i,2] <- N_rows # number of rows
+  leave1out_study[i,3] <- mean_N # mean sample size
+  leave1out_study[i,4] <- res$beta[1] #  effect size
+  leave1out_study[i,5] <- res$se[1] #  SE
+}
+
+leave1out_study
+leave1out_study[,1] <- as.vector(groupids) # Name studies
+leave1out_study_df <- as.data.frame(leave1out_study) # Convert to dataframe
+names(leave1out_study_df) <-c('study', 'N_rows', 'Mean_N',
+                              'es', 'se') # Rename columns
+
+# Convert columns from character to numeric
+leave1out_study_df <- leave1out_study_df %>% mutate_at(c('N_rows', 'Mean_N', 
+                                                         'es', 'se'), as.numeric)
+
+#Save dataset
+setwd(Tables)
+saveRDS(leave1out_study_df, file="leave1out_study.Rda")
+
+write.csv(leave1out_study_df, file="leave1out_study.csv")
+
+as.numeric(min(leave1out_study_df$es))
+as.numeric(max(leave1out_study_df$es))
+
+transf.ztor( 1.063579)
+transf.ztor(1.10228)
+
+#--------------------------------------------------------------------------------------------------------#
+#------------------ Exclude each EFFECT SIZE in turn to test overall meta-analytic effect ---------------------#
+#--------------------------------------------------------------------------------------------------------#
+
+leave1out_es <- matrix(NA, nrow(data), ncol=5) # generate matrix to hold results 
+
+for ( i in 1:nrow(data) ) {
+  
+  dataexcl <- data[-i,] # remove each ES in turn 
+  N_rows <- psych::describe(dataexcl$n)$n # extract the number of rows when each cohort is removed
+  mean_N <- psych::describe(dataexcl$n)$mean # extract the mean sample size when each cohort is removed
+  
+  # Run meta-analyses
+  res <- rma.mv(yi, vi, random=list(~ 1 | es_id, ~ 1 | ref), data=dataexcl) 
+  
+  # Put results into matrix
+  leave1out_es[i,1] <- i # cohort number excluded
+  leave1out_es[i,2] <- N_rows # number of rows
+  leave1out_es[i,3] <- mean_N # mean sample size
+  leave1out_es[i,4] <- res$beta[1] # effect size
+  leave1out_es[i,5] <- res$se[1] #SE
+}
+
+leave1out_es
+leave1out_es[,1] <- paste0(data$ref, "_", data$nesting_var)  # Name study and ES excluded
+leave1out_es_df <- as.data.frame(leave1out_es) # Convert to dataframe
+names(leave1out_es_df) <-c('effect size', 'N_rows', 'Mean_N',
+                              'es', 'se') # Rename columns
+
+# Convert columns from character to numeric
+leave1out_es_df <- leave1out_es_df %>% mutate_at(c('N_rows', 'Mean_N', 
+                                                         'es', 'se'), as.numeric)
+
+#Save dataset
+setwd(Tables)
+saveRDS(leave1out_es_df, file="leave1out_ES.Rda")
+
+leave1out_es_df <- readRDS(file="leave1out_ES.Rda")
+
+as.numeric(min(leave1out_es_df$es))
+as.numeric(max(leave1out_es_df$es))
+
+transf.ztor(1.070829)
+transf.ztor(1.087049)
+
+#--------------------------------------------------------------------------------------------------------#
+#------------------ Exclude each COHORT in turn to test overall meta-analytic effect ---------------------#
+#--------------------------------------------------------------------------------------------------------#
+groupids <- unique(data$cohort)  # generate groupid variable indexing each unique paper name
+leave1out_cohort <- matrix(rep(NA, length(groupids)), ncol=5, nrow=length(groupids)) # generate matrix to hold results 
+
+for(i in 1:length(groupids)) {  
+  dataexcl <- subset(data, cohort!=groupids[i])  # remove each paper in turn 
+  N_rows <- psych::describe(dataexcl$n)$n # extract the number of rows when each paper is removed
+  mean_N <- psych::describe(dataexcl$n)$mean # extract the mean sample size when each paper is removed
+  
+  # Run meta-analyses
+  res <- rma.mv(yi, vi, random=list(~ 1 | es_id, ~ 1 | ref), data=dataexcl) 
+  
+  # Put results into matrix
+  leave1out_cohort[i,1] <- i # cohort number excluded
+  leave1out_cohort[i,2] <- N_rows # number of rows
+  leave1out_cohort[i,3] <- mean_N # mean sample size
+  leave1out_cohort[i,4] <- res$beta[1] #  effect size
+  leave1out_cohort[i,5] <- res$se[1] #  SE
+}
+
+leave1out_cohort
+leave1out_cohort[,1] <- as.vector(groupids) # Name studies
+leave1out_cohort_df <- as.data.frame(leave1out_cohort) # Convert to dataframe
+names(leave1out_cohort_df) <-c('cohort', 'N_rows', 'Mean_N',
+                              'es', 'se') # Rename columns
+
+# Convert columns from character to numeric
+leave1out_cohort_df <- leave1out_cohort_df %>% mutate_at(c('N_rows', 'Mean_N', 
+                                                         'es', 'se'), as.numeric)
+
+#Save dataset
+setwd(Tables)
+saveRDS(leave1out_cohort_df, file="leave1out_cohort.Rda")
+
+leave1out_cohort_df <- readRDS(file="leave1out_cohort.Rda")
+
+as.numeric(min(leave1out_cohort_df$es))
+as.numeric(max(leave1out_cohort_df$es))
+
+transf.ztor(1.063579)
+transf.ztor(1.10228)
+
+```
+
+### leave-one-out analyses plots
+
+```{r, fig.width=10, fig.height=10}
+
+
+## cohort 
+
+leave1out_cohort_df <- readRDS("Tables/leave1out_cohort.Rda")
+
+# Step 1: Back-transform from Fisher's z to r
+leave1out_cohort_df <- leave1out_cohort_df %>%
+  mutate(
+    r = transf.ztor(es),
+    ci_lb = transf.ztor(es - 1.96 * se),
+    ci_ub = transf.ztor(es + 1.96 * se)
+  )
+
+# Step 2: Plot (remove hashtag to save)
+#png("forest_leave1out_cohort.png", width = 9, height = 1 + 0.2 * (nrow(leave1out_cohort_df) + 1), units = "in", res = 300)
+
+forest.default(
+  x = leave1out_cohort_df$r,
+  ci.lb = leave1out_cohort_df$ci_lb,
+  ci.ub = leave1out_cohort_df$ci_ub,
+  slab = leave1out_cohort_df$cohort,       # ✅ Use your cleaned-up study labels
+  xlim = c(0.69, 0.87),                 # ✅ Slight buffer around axis limits
+  alim = c(0.74, 0.84),                   # ✅ Correlation axis range
+  at = seq(0.74, 0.84, 0.02),             # ✅ Ticks every 0.02
+  xlab = "Correlation",
+  refline = NA,
+  order = "obs",
+  efac = 1.5,
+  pch = 19,
+  cex = 0.75,
+  cex.axis = 0.75,
+  cex.lab = 0.75,
+  main = "Leave-one-out analysis – excluding each cohort",
+  cex.main = 0.8
+)
+
+# Step 3: Add headers
+header_y <- nrow(leave1out_cohort_df) + 1.5
+text(0.69, header_y, "Cohort", pos = 4, font = 2, cex = 0.9)
+text(0.836,  header_y, "Correlation (95% CI)", pos = 4, font = 2, cex = 0.9)
+
+#dev.off()
+
+
+## study 
+
+leave1out_study_df <- readRDS("Tables/leave1out_study.Rda")
+
+# Step 1: Back-transform from Fisher's z to r
+leave1out_study_df <- leave1out_study_df %>%
+  mutate(
+    r = transf.ztor(es),
+    ci_lb = transf.ztor(es - 1.96 * se),
+    ci_ub = transf.ztor(es + 1.96 * se)
+  )
+
+# Step 2: Plot (remove hashtag)
+#png("forest_leave1out_study.png", width = 9, height = 1 + 0.2 * (nrow(leave1out_study_df) + 1), units = "in", res = 300)
+
+forest.default(
+  x = leave1out_study_df$r,
+  ci.lb = leave1out_study_df$ci_lb,
+  ci.ub = leave1out_study_df$ci_ub,
+  slab = leave1out_study_df$study,       # ✅ Use your cleaned-up study labels
+  xlim = c(0.69, 0.87),                 # ✅ Slight buffer around axis limits
+  alim = c(0.74, 0.84),                   # ✅ Correlation axis range
+  at = seq(0.74, 0.84, 0.02),             # ✅ Ticks every 0.02
+  xlab = "Correlation",
+  refline = NA,
+  order = "obs",
+  efac = 1.5,
+  pch = 19,
+  cex = 0.75,
+  cex.axis = 0.75,
+  cex.lab = 0.75,
+  main = "Leave-one-out analysis – excluding each study",
+  cex.main = 0.8
+)
+
+# Step 3: Add headers
+header_y <- nrow(leave1out_study_df) + 1.5
+text(0.69, header_y, "Study", pos = 4, font = 2, cex = 0.9)
+text(0.836,  header_y, "Correlation (95% CI)", pos = 4, font = 2, cex = 0.9)
+
+#dev.off()
+
+
+```
+
+## Moderators of test-retest reliability 
+
+We next examine test retest reliability is moderated by a-priori selected factors, including:
+
+
+* type of child maltreatment
+* measure type
+* sample type
+* sex distribution
+* baseline age
+* baseline age * time interval interaction
+* follow-up age
+* time interval
+* attrition
+* study quality
+* moderation analyses for clinical subset (proportion diagnosis, type of psychopathology, MH intervention)
+
+
+
+### Type of maltreatment
+```{r}
+## Below we test moderation by the type of maltreatment 
+
+## For each exposure type, we:
+# conduct an overall test of moderation
+# extract the meta-analytic effect sizes for each type of child maltreatment
+# extract number of studies for each type of child maltreatment
+# extract total sample size for each type of child maltreatment
+
+table(data$exposure_type)
+
+# test moderation by type of maltreatment
+mod_mal_type <- rma.mv(yi, vi,  
+                               random=list(~ 1 | es_id, ~ 1 | ref), 
+                               mods=~exposure_type,
+                               data=data)
+# extract meta-analytic effect sizes for each type of child maltreatment
+mod_mal_type_spec <- rma.mv(yi, vi,  
+                                    random=list(~ 1 | es_id, ~ 1 | ref), 
+                                    mods=~exposure_type-1,
+                                    data=data)
+
+# extract k studies with different types of child maltreatment
+k_mal_type <- data %>% 
+  filter(!is.na(ES) & !is.na(exposure_type)) %>%
+  dplyr::count(ref, exposure_type) %>%
+  dplyr::group_by(exposure_type) %>% dplyr::count(exposure_type)
+# extract total sample size for each type of maltreatment 
+n_mal_type <- data %>%  
+  dplyr::filter(!is.na(exposure_type) & !is.na(ES)) %>%
+  group_by(exposure_type, cohort) %>% 
+  dplyr::count(followup_n) %>%  
+  dplyr::summarise(m = max(followup_n)) %>%  print(n=100)%>% 
+  dplyr::summarise(n = sum(m)) 
+
+k_mal_type
+n_mal_type
+
+# Run pairwise comparison to see which exposures are significantly different
+pairwise_mt_types <- summary(glht(mod_mal_type_spec, linfct=cbind(contrMat(rep(1,7), type="Tukey"))), test=adjusted("none"))
+pvals <- pairwise_mt_types$test$pvalues
+pvals[pvals<=0.05] # Show significant pairwise differences
+levels(as.factor(data$exposure_type)) # Show levels of maltreatment variable to work out which effects differ
+# 1=ACEs; 2 = emotional abuse; 3=emotional neglect; 4=maltreatment; # 5=physical abuse; 6=physical neglect; 7 = sexual_abuse
+
+# calculating the proportion of heterogeneity explained by moderators :
+
+tau2_mod_mal_type <- sum(mod_mal_type$sigma2)
+
+R2 <- (tau2_res - tau2_mod_mal_type) / tau2_res
+
+mal_type_R2 <-  R2 *100
+
+mal_type_R2
+
+## test with dimensional model (broad measure of abuse and neglect)
+
+table(data$dimension)
+
+# test moderation by type of maltreatment
+mod_dimension <- rma.mv(yi, vi,  
+                               random=list(~ 1 | es_id, ~ 1 | ref), 
+                               mods=~dimension,
+                               data=data)
+# extract meta-analytic effect sizes for each type of child maltreatment
+mod_dimension_spec <- rma.mv(yi, vi,  
+                                    random=list(~ 1 | es_id, ~ 1 | ref), 
+                                    mods=~dimension-1,
+                                    data=data)
+
+# extract k studies with different types of child maltreatment
+k_dimension <- data %>% 
+  filter(!is.na(ES) & !is.na(dimension)) %>%
+  dplyr::count(ref, dimension) %>%
+  dplyr::group_by(dimension) %>% dplyr::count(dimension)
+# extract total sample size for each type of maltreatment 
+n_dimension <- data %>%  
+  dplyr::filter(!is.na(dimension) & !is.na(ES)) %>%
+  group_by(dimension, cohort) %>% 
+  dplyr::count(followup_n) %>%  
+  dplyr::summarise(m = max(followup_n)) %>%  print(n=100)%>% 
+  dplyr::summarise(n = sum(m)) 
+
+k_dimension
+n_dimension
+
+#calculate R-squared
+
+tau2_dimension <- sum(mod_dimension$sigma2)
+
+R2 <- (tau2_res - tau2_dimension) / tau2_res
+
+dimension_R2 <-  R2 *100
+
+dimension_R2
+
+```
+
+### Measure type (questionnaire/interview)
+
+```{r}
+
+table(data$baseline_measure_type)
+
+mod_measure <- rma.mv(yi, vi,  random=list(~ 1 | es_id, ~ 1 | ref), mods=~baseline_measure_type, data=data)
+
+# extract meta-analytic effect sizes for each type of  measure
+mod_measure_spec <- rma.mv(yi, vi,  random=list(~ 1 | es_id, ~ 1 | ref), mods=~baseline_measure_type-1, data=data)
+
+# extract k studies with measure type 
+k_measure <- data %>% 
+  filter(!is.na(ES) & !is.na(baseline_measure_type)) %>%
+  dplyr::count(ref, baseline_measure_type) %>%
+  dplyr::group_by(baseline_measure_type) %>% dplyr::count(baseline_measure_type)
+# extract total sample size for each measure type
+n_measure <- data %>%  
+  dplyr::filter(!is.na(baseline_measure_type) & !is.na(ES)) %>%
+  group_by(baseline_measure_type, cohort) %>% 
+  dplyr::count(followup_n) %>%  
+  dplyr::summarise(m = max(followup_n)) %>%  print(n=100)%>% 
+  dplyr::summarise(n = sum(m)) 
+
+k_measure
+n_measure
+
+# calculating the proportion of heterogeneity explained by moderators :
+
+tau2_mod_measure <- sum(mod_measure$sigma2)
+
+R2 <- (tau2_res - tau2_mod_measure) / tau2_res
+
+measure_R2 <- R2 *100
+
+measure_R2
+
+```
+
+### Sample type
+
+```{r}
+
+table(data$sample)
+
+data <- data %>%
+  mutate(sample = factor(sample, levels = c(0, 1, 2), labels = c("population representative", "convenience", "clinical")))
+
+table(data$sample)
+
+# test moderation by type of maltreatment
+mod_sample <- rma.mv(yi, vi,  
+                               random=list(~ 1 | es_id, ~ 1 | ref), 
+                               mods=~sample,
+                               data=data)
+# extract meta-analytic effect sizes for each type of child maltreatment
+mod_sample_spec <- rma.mv(yi, vi,  
+                                    random=list(~ 1 | es_id, ~ 1 | ref), 
+                                    mods=~sample-1,
+                                    data=data)
+
+# extract k studies with sample type
+k_sample <- data %>% 
+  filter(!is.na(ES) & !is.na(sample)) %>%
+  dplyr::count(ref, sample) %>%
+  dplyr::group_by(sample) %>% dplyr::count(sample)
+# extract total sample size for each sample type
+n_sample <- data %>%  
+  dplyr::filter(!is.na(sample) & !is.na(ES)) %>%
+  group_by(sample, cohort) %>% 
+  dplyr::count(followup_n) %>%  
+  dplyr::summarise(m = max(followup_n)) %>%  print(n=100)%>% 
+  dplyr::summarise(n = sum(m)) 
+
+k_sample
+n_sample
+
+# calculating the proportion of heterogeneity explained by moderators 
+tau2_mod_sample <- sum(mod_sample$sigma2)
+
+R2 <- (tau2_res - tau2_mod_sample) / tau2_res
+
+sample_R2 <- R2 *100
+
+sample_R2
+
+# Run pairwise comparison to see which exposures are significantly different
+pairwise_sample <- summary(glht(mod_sample_spec, linfct=cbind(contrMat(rep(1,3), type="Tukey"))), test=adjusted("none"))
+pvals <- pairwise_sample$test$pvalues
+pvals[pvals<=0.05] # Show significant pairwise differences
+levels(as.factor(data$sample)) # Show levels of maltreatment variable to work out which effects differ
+
+```
+
+### Sex distribution
+
+```{r}
+
+mod_sex <- rma.mv(yi, vi, random=list(~ 1 | es_id, ~ 1 | ref), 
+                              mods=percent_female, data=data)
+
+mod_sex
+
+# extract k studies with data on sex
+k_sex <- data %>%  
+  filter(!is.na(ES) & !is.na(percent_female)) %>%
+  group_by(ref) %>% # group by study reference
+  dplyr::summarise(m = max(ref)) %>%  # select one row per study 
+  nrow() # count number of rows
+# extract total sample size of studies with data on sex
+n_sex <- data %>%  
+  dplyr::filter(!is.na(percent_female) & !is.na(ES)) %>%
+  group_by(cohort) %>% 
+  dplyr::count(followup_n) %>%  
+  dplyr::summarise(m = max(followup_n)) %>%  print(n=100)%>% 
+  dplyr::summarise(n = sum(m)) 
+
+# examine bubble plot for continuous measures 
+#png("sex_moderation.png", width = 800, height = 600)
+#regplot(mod_sex, ylim= c(0,1), xlab="percent female", trans = transf.ztor, bg = "skyblue")
+#dev.off()
+
+# calculating the proportion of heterogeneity explained by moderators 
+
+tau2_mod_sex <- sum(mod_sex$sigma2)
+
+R2 <- (tau2_res - tau2_mod_sex) / tau2_res
+
+sex_R2 <- R2 *100
+
+sex_R2
+
+```
+
+### Baseline age
+
+```{r, fig.width=8, fig.height=6}
+
+# test moderation by baseline age
+mod_age <- rma.mv(yi, vi,  
+                               random=list(~ 1 | es_id, ~ 1 | ref), 
+                               mods=~baseline_age,
+                               data=data)
+
+mod_age
+
+# extract k studies with baseline age
+k_age <- data %>% 
+  filter(!is.na(ES) & !is.na(baseline_age)) %>%
+  group_by(ref) %>% # group by study reference
+  dplyr::summarise(m = max(ref)) %>%  # select one row per study 
+  nrow() # count number of rows
+# extract total sample size for studies with baseline age
+n_age <- data %>%  
+  dplyr::filter(!is.na(baseline_age) & !is.na(ES)) %>%
+  group_by(cohort) %>% 
+  dplyr::count(followup_n) %>%  
+  dplyr::summarise(m = max(followup_n)) %>%  print(n=100)%>% 
+  dplyr::summarise(n = sum(m)) 
+
+# calculating the proportion of heterogeneity explained by moderators :
+
+tau2_mod_age <- sum(mod_age$sigma2)
+
+R2 <- (tau2_res - tau2_mod_age) / tau2_res
+
+age_R2 <- R2 *100
+
+# examine bubble plot (remove hashtag to save)
+
+#png("baseline_age_moderation.png", width = 800, height = 600)
+regplot(mod_age, ylim= c(0,1), xlab="Baseline age", trans = transf.ztor, bg = "skyblue")
+#dev.off()
+
+## Add a log term as the relationship appears to be nonlinear
+
+mod_age_nonlinear <- rma.mv(yi, vi,  
+                            random = list(~ 1 | es_id, ~ 1 | ref), 
+                            mods = ~ baseline_age + log(baseline_age),
+                            data = data)
+
+anova(mod_age, mod_age_nonlinear)
+
+# Plot log model 
+# Generate a sequence of baseline ages for smooth plotting
+age_seq <- seq(min(data$baseline_age, na.rm = TRUE), 
+               max(data$baseline_age, na.rm = TRUE), 
+               length.out = 100)
+
+# Create the new moderator matrix 
+newmods_matrix <- cbind(age_seq, log(age_seq))
+
+# Get predicted values (in Fisher's z) and apply the inverse transformation (Fisher's z → correlation)
+preds <- predict(mod_age_nonlinear, newmods = newmods_matrix)
+
+# Apply Fisher's z-to-r transformation
+plot_data <- data.frame(
+  baseline_age = age_seq,
+  predicted_yi = transf.ztor(preds$pred),  # Convert to correlation scale
+  ci_lb = transf.ztor(preds$ci.lb),  # Convert lower bound
+  ci_ub = transf.ztor(preds$ci.ub)   # Convert upper bound
+)
+
+# Save the plot as a PNG (remove hashtag)
+#png("baseline_age_log.png", width = 800, height = 600)
+
+ggplot(plot_data, aes(x = baseline_age, y = predicted_yi)) +
+  geom_ribbon(aes(ymin = ci_lb, ymax = ci_ub), fill = "skyblue", alpha = 0.3) +  # Confidence interval
+  geom_line(color = "blue", size = 1) +  # Predicted effect
+  geom_point(data = data, aes(x = baseline_age, y = transf.ztor(yi)), alpha = 0.5) +  # Raw data points (inverse transformed)
+  labs(title = "Effect of Baseline Age on Reliability (Correlation Scale)",
+       x = "Baseline Age",
+       y = "Correlation") +
+  theme_minimal()
+
+#dev.off()
+
+## Binary categorisation of baseline age
+
+mod_age_bin <- rma.mv(yi, vi,  
+                               random=list(~ 1 | es_id, ~ 1 | ref), 
+                               mods=~baseline_age_binary,
+                               data=data)
+# extract meta-analytic effect sizes for binary age categories
+mod_age_bin_spec <- rma.mv(yi, vi,  
+                                    random=list(~ 1 | es_id, ~ 1 | ref), 
+                                    mods=~baseline_age_binary-1,
+                                    data=data)
+
+# extract k studies 
+k_age_bin <- data %>% 
+  filter(!is.na(ES) & !is.na(baseline_age_binary)) %>%
+  dplyr::count(ref, baseline_age_binary) %>%
+  dplyr::group_by(baseline_age_binary) %>% dplyr::count(baseline_age_binary)
+# extract total sample size 
+n_age_bin <- data %>%  
+  dplyr::filter(!is.na(baseline_age_binary) & !is.na(ES)) %>%
+  group_by(baseline_age_binary, cohort) %>% 
+  dplyr::count(followup_n) %>%  
+  dplyr::summarise(m = max(followup_n)) %>%  print(n=100)%>% 
+  dplyr::summarise(n = sum(m)) 
+
+# calculating the proportion of heterogeneity explained by moderator:
+
+tau2_mod_age_bin <- sum(mod_age_bin$sigma2)
+
+R2 <- (tau2_res - tau2_mod_age_bin) / tau2_res
+
+age_bin_R2 <- R2 *100
+age_bin_R2
+
+```
+
+### Multivariate model: baseline age and follow up interval
+
+```{r}
+
+# test moderation by baseline age & time interval
+mod_age_time <- rma.mv(yi, vi,  
+                               random=list(~ 1 | es_id, ~ 1 | ref), 
+                               mods=~baseline_age_binary + followup_interval,
+                               data=data)
+
+summary(mod_age_time)
+
+# Plot interaction model 
+
+# Create new data grid for prediction
+new_data_1 <- expand.grid(
+  baseline_age_binary = c(0, 1),           # 0 = Age ≤ 18, 1 = Age > 18
+  followup_interval = 1:261                # Follow-up interval in weeks (up to 5 years)
+)
+
+# Generate predictor matrix (drop intercept)
+X <- model.matrix(
+  ~ baseline_age_binary + followup_interval,
+  data = new_data_1
+)[, -1]
+
+# Predict from interaction model NOTE: still on z-scale
+preds <- predict(mod_age_time, newmods = X)
+
+# Add predicted values. ALso transform to correlation scale before plotting 
+new_data_1 <- new_data_1 %>%
+  mutate(
+    correlation = transf.ztor(preds$pred),
+    ci_lower = transf.ztor(preds$ci.lb),
+    ci_upper = transf.ztor(preds$ci.ub),
+    age_group = ifelse(baseline_age_binary == 0, "Age ≤ 18", "Age > 18")
+  )
+
+#Remove hashtag to save
+#png("age_time_plot.png", width = 800, height = 600)
+
+ggplot(new_data_1, aes(x = followup_interval, y = correlation, color = age_group, fill = age_group)) +
+  geom_ribbon(aes(ymin = ci_lower, ymax = ci_upper), alpha = 0.2) +  # Shaded CI bands
+  geom_line(size = 1) +  # Predicted correlation lines
+  scale_y_continuous(limits = c(-0.25, 1)) +
+  scale_color_manual(
+    values = c("Age > 18" = "mediumpurple3", "Age ≤ 18" = "palegreen3")
+  ) +
+  scale_fill_manual(
+    values = c("Age > 18" = "mediumpurple3", "Age ≤ 18" = "palegreen3")
+  ) +
+  labs(
+    x = "Follow-up Interval (weeks)",
+    y = "Predicted Test-Retest Correlation",
+    color = "Baseline Age Group",
+    fill = "Baseline Age Group"
+  ) +
+  theme_minimal(base_size = 15)
+
+#dev.off()
+
+```
+
+
+### Interaction between baseline age and follow up interval
+
+```{r}
+
+# test interaction by baseline age & time interval
+mod_age_interval <- rma.mv(yi, vi,  
+                               random=list(~ 1 | es_id, ~ 1 | ref), 
+                               mods=~baseline_age_binary + followup_interval + baseline_age_binary*followup_interval,
+                               data=data)
+
+summary(mod_age_interval)
+
+tau2_mod_age_interval <- sum(mod_age_interval$sigma2)
+
+R2 <- (tau2_res - tau2_mod_age_interval) / tau2_res
+
+age_interval_R2 <- R2 *100
+age_interval_R2
+
+# Plot interaction model 
+
+# Create new data grid for prediction
+new_data <- expand.grid(
+  baseline_age_binary = c(0, 1),           # 0 = Age ≤ 18, 1 = Age > 18
+  followup_interval = 1:261                # Follow-up interval in weeks (up to 5 years)
+)
+
+# Generate predictor matrix (drop intercept)
+X <- model.matrix(
+  ~ baseline_age_binary + followup_interval + baseline_age_binary * followup_interval,
+  data = new_data
+)[, -1]
+
+# Predict from interaction model NOTE: still on z-scale
+preds <- predict(mod_age_interval, newmods = X)
+
+# Add predicted values. ALso transform to correlation scale before plotting 
+new_data <- new_data %>%
+  mutate(
+    correlation = transf.ztor(preds$pred),
+    ci_lower = transf.ztor(preds$ci.lb),
+    ci_upper = transf.ztor(preds$ci.ub),
+    age_group = ifelse(baseline_age_binary == 0, "Age ≤ 18", "Age > 18")
+  )
+
+#Remove hashtag to save
+#png("age_interval_predicted_continuous.png", width = 800, height = 600)
+
+ggplot(new_data, aes(x = followup_interval, y = correlation, color = age_group, fill = age_group)) +
+  geom_ribbon(aes(ymin = ci_lower, ymax = ci_upper), alpha = 0.2) +  # Shaded CI bands
+  geom_line(size = 1) +  # Predicted correlation lines
+  scale_y_continuous(limits = c(-0.25, 1)) +
+  scale_color_manual(
+    values = c("Age > 18" = "mediumpurple3", "Age ≤ 18" = "palegreen3")
+  ) +
+  scale_fill_manual(
+    values = c("Age > 18" = "mediumpurple3", "Age ≤ 18" = "palegreen3")
+  ) +
+  labs(
+    x = "Follow-up Interval (weeks)",
+    y = "Predicted Test-Retest Correlation",
+    color = "Baseline Age Group",
+    fill = "Baseline Age Group"
+  ) +
+  theme_minimal(base_size = 15)
+
+#dev.off()
+
+```
+
+
+### Follow-up age 
+
+```{r, fig.width=8, fig.height=6}
+ 
+# test moderation by follow up age
+mod_followup_age <- rma.mv(yi, vi,  
+                               random=list(~ 1 | es_id, ~ 1 | ref), 
+                               mods=~followup_age,
+                               data=data)
+
+# extract k studies with follow up age
+k_followup_age <- data %>% 
+  filter(!is.na(ES) & !is.na(followup_age)) %>%
+  group_by(ref) %>% # group by study reference
+  dplyr::summarise(m = max(ref)) %>%  # select one row per study 
+  nrow() # count number of rows
+# extract total sample size for studies with follow up age
+n_followup_age <- data %>%  
+  dplyr::filter(!is.na(followup_age) & !is.na(ES)) %>%
+  group_by(cohort) %>% 
+  dplyr::count(followup_n) %>%  
+  dplyr::summarise(m = max(followup_n)) %>%  print(n=100)%>% 
+  dplyr::summarise(n = sum(m)) 
+
+# calculating the proportion of heterogeneity explained by moderator:
+
+tau2_mod_followup_age <- sum(mod_followup_age$sigma2)
+
+R2 <- (tau2_res - tau2_mod_followup_age) / tau2_res
+
+followup_age_R2 <- R2 *100
+
+followup_age_R2
+
+# examine bubble plot (remove hashtag to save)
+#png("followupage.png", width = 800, height = 600)
+regplot(mod_followup_age, ylim= c(0,1), xlab="Follow up age", trans = transf.ztor, bg = "skyblue")
+#dev.off()
+
+```
+
+### Time interval 
+
+```{r, fig.width=8, fig.height=6}
+
+mod_interval <- rma.mv(yi, vi, random=list(~ 1 | es_id, ~ 1 | ref), 
+                              mods=~ followup_interval, data=data)
+
+# extract k studies with data on time interval
+k_interval <- data %>%  
+  filter(!is.na(ES) & !is.na(followup_interval)) %>%
+  group_by(ref) %>% # group by study reference
+  dplyr::summarise(m = max(ref)) %>%  # select one row per study 
+  nrow() # count number of rows
+# extract total sample size of studies with data on time interval
+n_interval <- data %>%  
+  dplyr::filter(!is.na(followup_interval) & !is.na(ES)) %>%
+  group_by(cohort) %>% 
+  dplyr::count(followup_n) %>%  
+  dplyr::summarise(m = max(followup_n)) %>%  print(n=100)%>% 
+  dplyr::summarise(n = sum(m)) 
+
+# proportion of variance explained by moderator 
+
+tau2_mod_interval <- sum(mod_interval$sigma2)
+
+R2 <- (tau2_res - tau2_mod_interval) / tau2_res
+
+interval_R2 <- R2 *100
+
+interval_R2 
+
+#examine bubble plot (remove hashtag to save)
+
+#png("interval.png", width = 800, height = 600)
+regplot(mod_interval, ylim= c(0,1), xlab="follow up time interval (weeks)", trans = transf.ztor, bg = "skyblue")
+#dev.off
+
+```
+
+
+### Attrition 
+
+```{r, fig.width=8, fig.height=6}
+
+mod_attrition <- rma.mv(yi, vi, random=list(~ 1 | es_id, ~ 1 | ref), 
+                              mods=attrition, data=data)
+
+mod_attrition
+
+# extract k studies with attrtion rates
+k_attrition <- data %>% 
+  filter(!is.na(ES) & !is.na(attrition)) %>%
+  group_by(ref) %>% # group by study reference
+  dplyr::summarise(m = max(ref)) %>%  # select one row per study 
+  nrow() # count number of rows
+# extract total sample size for studies with attrition rates
+n_attrition <- data %>%  
+  dplyr::filter(!is.na(attrition) & !is.na(ES)) %>%
+  group_by(cohort) %>% 
+  dplyr::count(followup_n) %>%  
+  dplyr::summarise(m = max(followup_n)) %>%  print(n=100)%>% 
+  dplyr::summarise(n = sum(m)) 
+
+#examine bubble plot (remove hashtag to save)
+#png("attrition.png", width = 800, height = 600)
+regplot(mod_attrition, ylim= c(0,1), xlab="attrition (%)", trans = transf.ztor, bg = "skyblue")
+#dev.off()
+
+# calculating the proportion of heterogeneity explained by moderator:
+
+tau2_mod_attrition <- sum(mod_attrition$sigma2)
+
+R2 <- (tau2_res - tau2_mod_attrition) / tau2_res
+
+attrition_R2 <- R2 *100
+attrition_R2 
+
+```
+
+### Study quality 
+
+```{r}
+
+# test moderation by study quality
+mod_quality <- rma.mv(yi, vi,  
+                               random=list(~ 1 | es_id, ~ 1 | ref), 
+                               mods=~q_total,
+                               data=data)
+
+mod_quality
+
+# extract k studies with baseline age
+k_quality <- data %>% 
+  filter(!is.na(ES) & !is.na(q_total)) %>%
+  group_by(ref) %>% # group by study reference
+  dplyr::summarise(m = max(ref)) %>%  # select one row per study 
+  nrow() # count number of rows
+# extract total sample size for studies with baseline age
+n_quality <- data %>%  
+  dplyr::filter(!is.na(q_total) & !is.na(ES)) %>%
+  group_by(cohort) %>% 
+  dplyr::count(followup_n) %>%  
+  dplyr::summarise(m = max(followup_n)) %>%  print(n=100)%>% 
+  dplyr::summarise(n = sum(m)) 
+
+# calculating the proportion of heterogeneity explained by moderators :
+
+tau2_mod_quality <- sum(mod_quality$sigma2)
+
+R2 <- (tau2_res - tau2_mod_quality) / tau2_res
+
+quality_R2 <- R2 *100
+
+quality_R2
+
+```
+
+
+### Clinical subset 
+
+```{r, fig.width=8, fig.height=6}
+
+
+data$clinical <- ifelse(data$sample == 2, 1, 0)
+
+# subset to only studies that include MH diagnosis
+data_MH <- subset(data, !is.na(sample_mh))
+
+
+
+dplyr::select(data, author, clinical, sample_mh)
+
+res_MH <- rma.mv(yi, vi, random=list(~ 1 | es_id, ~ 1 | ref), data=data_MH)
+
+res_MH
+
+predict(res_MH, transf=transf.ztor, digits=2)
+
+tau2_res_MH <- sum(res_MH$sigma2)
+
+## not all studies 100% clinical sample, so first test for proportion diagnosis within clinical sample 
+
+# test moderation by type of MH
+mod_prop_diag <- rma.mv(yi, vi,  
+                               random=list(~ 1 | es_id, ~ 1 | ref), 
+                               mods=~proportion_diagnosis,
+                               data=data_MH)
+
+mod_prop_diag
+
+transf.ztor(mod_prop_diag$beta)
+transf.ztor(mod_prop_diag$ci.lb)
+transf.ztor(mod_prop_diag$ci.ub)
+
+#examine plot (remove hashtag to save)
+#png("diagnosis.png", width = 800, height = 600)
+regplot(mod_prop_diag, ylim= c(0,1), xlab="Proportion diagnosis", trans = transf.ztor, bg = "skyblue")
+#dev.off()
+
+# extract k studies with baseline age
+k_prop_diag <- data_MH %>% 
+  filter(!is.na(ES) & !is.na(proportion_diagnosis)) %>%
+  group_by(ref) %>% # group by study reference
+  dplyr::summarise(m = max(ref)) %>%  # select one row per study 
+  nrow() # count number of rows
+# extract total sample size for studies with baseline age
+n_prop_diag <- data_MH %>%  
+  dplyr::filter(!is.na(proportion_diagnosis) & !is.na(ES)) %>%
+  group_by(cohort) %>% 
+  dplyr::count(followup_n) %>%  
+  dplyr::summarise(m = max(followup_n)) %>%  print(n=100)%>% 
+  dplyr::summarise(n = sum(m)) 
+
+tau2_mod_prop_diag <- sum(mod_prop_diag$sigma2)
+
+R2 <- (tau2_res_MH - tau2_mod_prop_diag) / tau2_res_MH
+
+prop_diag_R2 <- R2 *100
+
+prop_diag_R2
+
+# test moderation by type of MH diagnosis 
+
+table(data_MH$sample_mh)
+
+mod_mh <- rma.mv(yi, vi,  
+                               random=list(~ 1 | es_id, ~ 1 | ref), 
+                               mods=~sample_mh,
+                               data=data_MH)
+# extract meta-analytic effect sizes for each type of child maltreatment
+mod_mh_spec <- rma.mv(yi, vi,  
+                                    random=list(~ 1 | es_id, ~ 1 | ref), 
+                                    mods=~sample_mh-1,
+                                    data=data_MH)
+
+transf.ztor(mod_mh_spec$beta)
+
+# extract k studies with diagnosis
+k_diagnosis <- data %>% 
+  filter(!is.na(ES) & !is.na(sample_mh)) %>%
+  dplyr::count(ref, sample_mh) %>%
+  dplyr::group_by(sample_mh) %>% dplyr::count(sample_mh)
+# extract total sample size for each diagnosis
+n_diagnosis <- data %>%  
+  dplyr::filter(!is.na(sample_mh) & !is.na(ES)) %>%
+  group_by(sample_mh, cohort) %>% 
+  dplyr::count(followup_n) %>%  
+  dplyr::summarise(m = max(followup_n)) %>%  print(n=100)%>% 
+  dplyr::summarise(n = sum(m)) 
+
+tau2_diagnosis <- sum(mod_mh$sigma2)
+
+R2 <- (tau2_res_MH - tau2_diagnosis) / tau2_res_MH
+
+diagnosis_R2 <- R2 *100
+
+diagnosis_R2
+
+# test moderation by mental health intervention 
+
+table(data_MH$sample_intervention)
+
+data_MH$sample_intervention <- factor(
+  ifelse(data_MH$sample_intervention == 0, "no intervention", "intervention"))
+
+table(data_MH$sample_intervention)
+
+mod_intervention <- rma.mv(yi, vi,  
+                               random=list(~ 1 | es_id, ~ 1 | ref), 
+                               mods=~sample_intervention,
+                               data=data_MH)
+# extract meta-analytic effect sizes for each type of child maltreatment
+mod_intervention_spec <- rma.mv(yi, vi,  
+                                    random=list(~ 1 | es_id, ~ 1 | ref), 
+                                    mods=~sample_intervention-1,
+                                    data=data_MH)
+
+# extract k studies with intervention
+k_intervention <- data_MH %>% 
+  filter(!is.na(ES) & !is.na(sample_intervention)) %>%
+  dplyr::count(ref, sample_intervention) %>%
+  dplyr::group_by(sample_intervention) %>% dplyr::count(sample_intervention)
+# extract total sample size for intervention
+n_intervention <- data_MH %>%  
+  dplyr::filter(!is.na(sample_intervention) & !is.na(ES)) %>%
+  group_by(sample_intervention, cohort) %>% 
+  dplyr::count(followup_n) %>%  
+  dplyr::summarise(m = max(followup_n)) %>%  print(n=100)%>% 
+  dplyr::summarise(n = sum(m)) 
+
+tau2_intervention <- sum(mod_intervention$sigma2)
+
+R2 <- (tau2_res_MH - tau2_intervention) / tau2_res_MH
+
+intervention_R2 <- R2 *100
+
+intervention_R2
+
+## sensitivity analysis including only instances where sample is 100% clinical 
+
+data_all_clinical <- subset(data, proportion_diagnosis == 100)
+
+res_all_clinical <- rma.mv(yi, vi, random=list(~ 1 | es_id, ~ 1 | ref), data=data_all_clinical)
+
+res_all_clinical
+
+predict(res_all_clinical, transf=transf.ztor, digits=2)
+
+tau2_res_all_clinical <- sum(res_all_clinical$sigma2)
+
+## repeat moderation analyses within this subset 
+
+# type of psychopathology
+
+table(data_all_clinical$sample_mh)
+
+mod_mh_all_clinical <- rma.mv(yi, vi,  
+                               random=list(~ 1 | es_id, ~ 1 | ref), 
+                               mods=~sample_mh,
+                               data=data_all_clinical)
+# extract meta-analytic effect sizes for each type of child maltreatment
+mod_mh_all_clinical_spec <- rma.mv(yi, vi,  
+                                    random=list(~ 1 | es_id, ~ 1 | ref), 
+                                    mods=~sample_mh-1,
+                                    data=data_all_clinical)
+
+transf.ztor(mod_mh_all_clinical_spec$ci.ub)
+
+
+
+# extract k studies with diagnosis
+k_diagnosis_all <- data_all_clinical %>% 
+  filter(!is.na(ES) & !is.na(sample_mh)) %>%
+  dplyr::count(ref, sample_mh) %>%
+  dplyr::group_by(sample_mh) %>% dplyr::count(sample_mh)
+# extract total sample size for each diagnosis
+n_diagnosis_all <- data_all_clinical %>%  
+  dplyr::filter(!is.na(sample_mh) & !is.na(ES)) %>%
+  group_by(sample_mh, cohort) %>% 
+  dplyr::count(followup_n) %>%  
+  dplyr::summarise(m = max(followup_n)) %>%  print(n=100)%>% 
+  dplyr::summarise(n = sum(m)) 
+
+k_diagnosis_all
+n_diagnosis_all
+
+tau2_diagnosis_all <- sum(mod_mh_all_clinical$sigma2)
+
+R2 <- (tau2_res_all_clinical - tau2_diagnosis_all) / tau2_res_all_clinical
+
+diagnosis_all_R2 <- R2 *100
+
+diagnosis_all_R2
+
+# intervention
+
+table(data_all_clinical$sample_intervention)
+
+data_all_clinical$sample_intervention <- factor(
+  ifelse(data_all_clinical$sample_intervention == 0, "no intervention", "intervention"))
+
+mod_intervention_all_clinical <- rma.mv(yi, vi,  
+                               random=list(~ 1 | es_id, ~ 1 | ref), 
+                               mods=~sample_intervention,
+                               data=data_all_clinical)
+# extract meta-analytic effect sizes for each type of child maltreatment
+mod_intervention_all_clinical_spec <- rma.mv(yi, vi,  
+                                    random=list(~ 1 | es_id, ~ 1 | ref), 
+                                    mods=~sample_intervention-1,
+                                    data=data_all_clinical)
+
+transf.ztor(mod_intervention_all_clinical_spec$ci.ub)
+
+# extract k studies with intervention
+k_intervention_all <- data_all_clinical %>% 
+  filter(!is.na(ES) & !is.na(sample_intervention)) %>%
+  dplyr::count(ref, sample_intervention) %>%
+  dplyr::group_by(sample_intervention) %>% dplyr::count(sample_intervention)
+# extract total sample size for intervention
+n_intervention_all <- data_all_clinical %>%  
+  dplyr::filter(!is.na(sample_intervention) & !is.na(ES)) %>%
+  group_by(sample_intervention, cohort) %>% 
+  dplyr::count(followup_n) %>%  
+  dplyr::summarise(m = max(followup_n)) %>%  print(n=100)%>% 
+  dplyr::summarise(n = sum(m)) 
+
+k_intervention_all
+n_intervention_all
+
+# r-squared
+tau2_intervention_all <- sum(mod_intervention_all_clinical$sigma2)
+
+R2 <- (tau2_res_all_clinical - tau2_intervention_all) / tau2_res_all_clinical
+
+intervention_all_R2 <- R2 *100
+
+intervention_all_R2
+
+```
+
+
+
+## Create tables with main moderation results 
+
+Here we create a table showing the moderation results. First we define a function to input all of the results into the table, before collating all the results and generating the table.
+
+#### Define function to make moderation table 
+```{r}
+
+# Define function to combine effect estimates and CIs into a single cell for the table
+paste_res <- function(est, lowCI, upCI) {
+  mapply(function(e, l, u) {
+    if (any(is.na(c(e, l, u)))) {
+      return("")
+    } else {
+      return(paste0(format(round(e, 2), nsmall = 2), 
+                    " (", 
+                    format(round(l, 2), nsmall = 2), 
+                    "-", 
+                    format(round(u, 2), nsmall = 2), 
+                    ")"))
+    }
+  }, est, lowCI, upCI, USE.NAMES = FALSE)
+}
+
+## Make a function collating all the moderation results  ahead of making table 
+moderation_res <- function(k_mal_type, k_measure, k_sample, k_sex, k_age, 
+                           k_followup_age, k_interval,  k_attrition, k_quality,
+                           n_mal_type, n_measure, n_sample, n_sex, n_age,
+                           n_followup_age, n_interval , n_attrition, n_quality,
+                           n_es_mal_type, n_es_measure, n_es_sample, n_es_sex, n_es_age,
+                           n_es_followup_age, n_es_interval, n_es_attrition, n_es_quality,
+                           mod_mal_type, mod_mal_type_spec, 
+                           mod_measure, mod_measure_spec,
+                           mod_sample, mod_sample_spec,
+                           mod_sex,
+                           mod_age,
+                           mod_followup_age,
+                           mod_interval,
+                           mod_attrition,
+                           mod_quality,
+                           mal_type_R2, measure_R2, sample_R2, sex_R2, age_R2, 
+                           followup_age_R2, interval_R2, attrition_R2, quality_R2)
+                          
+ {
+ 
+  # Make variable with moderator type and level
+  mod_type <- c("Type of maltreatment", # type of maltreatment
+                "ACEs", 
+                "Emotional abuse",
+                "Emotional neglect", 
+                "Maltreatment",
+                "Physical abuse",
+                "Physical neglect",
+                "Sexual abuse",
+                "Measure type",# measure type
+                "Interview", 
+                "Questionnaire",
+                "Sample type", #sample type
+                "Population representative",
+                "Convenience",
+                "Clinical", 
+                "Sex distribution (% female)", # sex
+                "Baseline age", # baseline age
+                "Follow-up age", # follow up age
+                "Time interval (years)", # time interval
+                "Loss to attrition (%)",# attrition
+                "Quality") #quality check
+  
+
+ # Make variable summarising the k studies for each moderator/moderator category
+  k <- as.vector(unlist(c(NA, k_mal_type[c(1,2,3,4,5,6,7),2],# type of maltreatment (ace, emotional abuse, emotional neglect, mt, physical abuse, physical neglect, sexual abuse)
+                          NA, k_measure[c(1,2),2], # measure type (interview, questionnaire)
+                          NA, k_sample[c(1,2,3),2],
+                          k_sex, # sex
+                          k_age, # baseline age
+                          k_followup_age,
+                          k_interval, # time interval 
+                          k_attrition, #attrition
+                          k_quality))) 
+
+  # Make variable summarising the sample size for each moderator/moderator category
+  
+  n <- as.vector(unlist(c(NA, n_mal_type[c(1,2,3,4,5,6,7),2],# type of maltreatment (ace, emotional abuse, emotional neglect, mt, physical abuse, physical neglect, sexual abuse)
+                          NA, n_measure[c(1,2),2], # measure type (interview, questionnaire)
+                          NA, n_sample[c(1,2,3),2],
+                          n_sex, # sex
+                          n_age, # baseline age
+                          n_followup_age,
+                          n_interval, # time interval 
+                          n_attrition, #attrition
+                          n_quality))) 
+
+
+  # Make variable summarising the number of effect sizes for each moderator/moderator category
+  n_es <- as.vector(unlist(c(NA, n_es_mal_type[c(1,2,3,4,5,6,7)],# type of maltreatment (ace, emotional abuse, emotional neglect, mt, physical abuse, physical neglect, sexual abuse)
+                          NA, n_es_measure[c(1,2)], # measure type (interview, questionnaire)
+                          NA, n_es_sample[c(1,2,3)],
+                          n_es_sex, # sex
+                          n_es_age, # baseline age
+                          n_es_followup_age,
+                          n_es_interval, # time interval 
+                          n_es_attrition, #attrition
+                          n_es_quality))) 
+
+# Make variable summarising the effect sizes for each moderator/moderator category
+  ES <- c(NA, transf.ztor(mod_mal_type_spec$beta[c(1,2,3,4,5,6,7)]),# type of maltreatment (ace, emotional abuse, emotional neglect, mt, physical abuse, physical neglect, sexual abuse))
+          NA, transf.ztor(mod_measure_spec$beta[c(1,2)]), 
+          NA, transf.ztor(mod_sample_spec$beta[c(1,2,3)]),
+          transf.ztor(mod_sex$beta[2]),
+          transf.ztor(mod_age$beta[2]),
+          transf.ztor(mod_followup_age$beta[2]),
+          transf.ztor(mod_interval$beta[2]),
+          transf.ztor(mod_attrition$beta[2]),
+          transf.ztor(mod_quality$beta[2]))
+
+ # Make variable summarising the lower CI for each moderator/moderator category
+  lowCI <- c(NA, transf.ztor(mod_mal_type_spec$ci.lb[c(1,2,3,4,5,6,7)]),
+              NA, transf.ztor(mod_measure_spec$ci.lb[c(1,2)]), 
+          NA, transf.ztor(mod_sample_spec$ci.lb[c(1,2,3)]),
+          transf.ztor(mod_sex$ci.lb[2]),
+          transf.ztor(mod_age$ci.lb[2]),
+          transf.ztor(mod_followup_age$ci.lb[2]),
+          transf.ztor(mod_interval$ci.lb[2]),
+          transf.ztor(mod_attrition$ci.lb[2]),
+          transf.ztor(mod_quality$ci.lb[2]))
+
+  # Make variable summarising the upper CI for each moderator/moderator category
+ upCI <- c(NA,transf.ztor(mod_mal_type_spec$ci.ub[c(1,2,3,4,5,6,7)]),
+            NA, transf.ztor(mod_measure_spec$ci.ub[c(1,2)]), 
+          NA, transf.ztor(mod_sample_spec$ci.ub[c(1,2,3)]),
+          transf.ztor(mod_sex$ci.ub[2]),
+          transf.ztor(mod_age$ci.ub[2]),
+          transf.ztor(mod_followup_age$ci.ub[2]),
+          transf.ztor(mod_interval$ci.ub[2]),
+          transf.ztor(mod_attrition$ci.ub[2]),
+          transf.ztor(mod_quality$ci.ub[2]))
+
+  
+ # Make variable summarising the Q_moderation statistic for each moderator
+  Q_mod <- c(mod_mal_type$QM,
+             NA, NA, NA, NA, NA, NA, NA, #7 types of MT listed
+             mod_measure$QM,
+             NA, NA,
+             mod_sample$QM, 
+             NA, NA, NA,
+             mod_sex$QM, 
+             mod_age$QM,
+             mod_followup_age$QM,
+             mod_interval$QM,
+             mod_attrition$QM,
+             mod_quality$QM)
+
+ # Make variable summarising the p-value for each moderator
+  p <- c(mod_mal_type$QMp,
+             NA, NA, NA, NA, NA, NA, NA, #7 types of MT listed
+             mod_measure$QMp,
+             NA, NA,
+             mod_sample$QMp, 
+             NA, NA, NA,
+             mod_sex$QMp, 
+             mod_age$QMp,
+             mod_followup_age$QMp,
+             mod_interval$QMp,
+             mod_attrition$QMp,
+             mod_quality$QMp)
+  
+  # Make variable summarising R^2 
+  
+ R2 <- c(mal_type_R2,
+             NA, NA, NA, NA, NA, NA, NA, #7 types of MT listed
+             measure_R2,
+             NA, NA,
+             sample_R2, 
+             NA, NA, NA,
+             sex_R2, 
+             age_R2,
+             followup_age_R2,
+             interval_R2,
+             attrition_R2,
+             quality_R2)
+
+
+# Collate results into dataframe
+  mod <- as.data.frame(cbind(mod_type, k, n, n_es,
+                             format(round(ES, 2), nsmall=2), 
+                                       format(round(lowCI, 2), nsmall=2), 
+                                       format(round(upCI, 2), nsmall=2),
+                                       format(round(Q_mod, 2), nsmall=2),
+                                       format(round(p, 3), nsmall=3), 
+                                       format(round(R2, 2), nsmall=2)))
+
+colnames(mod) <- c("Moderator", "k","n", "n_es", "OR", "Low_CI", "Up_CI", "Q_mod", "p_value", "R^2")
+
+    ## Convert variables to numeric
+  cols.num <- c( "n", "OR", "Low_CI", "Up_CI", "Q_mod", "p_value", "R^2")
+  mod[cols.num] <- sapply(mod[cols.num],as.numeric)
+  
+  ## Create new variable with OR and CIs pasted into one
+  mod$ES_CI <- paste_res(mod$OR, mod$Low_CI, mod$Up_CI)
+  
+  
+  # Condense table
+  mod_table <- subset(mod, select=c("Moderator", "k", "n", "n_es", "ES_CI", "Q_mod", "p_value", "R^2"))
+  
+   return(mod_table)
+}
+
+```
+
+```{r, results='asis'}
+options(knitr.kable.NA = '') # ensure kable does not print NAs 
+
+## Make moderation table 
+moderation_result <- moderation_res(k_mal_type, k_measure, k_sample, k_sex, k_age, 
+                           k_followup_age, k_interval,  k_attrition, k_quality,
+                           n_mal_type, n_measure, n_sample, n_sex, n_age,
+                           n_followup_age, n_interval , n_attrition, n_quality,
+                           table(data$exposure_type[!is.na(data$ES)]),
+                           table(data$baseline_measure_type[!is.na(data$ES)]),
+                           table(data$sample[!is.na(data$ES)]),
+                           length(data$percent_female[!is.na(data$percent_female) 
+                                                      & !is.na(data$ES)]),
+                           length(data$baseline_age[!is.na(data$baseline_age) 
+                                                    & !is.na(data$ES)]),
+                           length(data$followup_age[!is.na(data$followup_age) 
+                                                     & !is.na(data$ES)]),
+                           length(data$followup_interval[!is.na(data$followup_interval) 
+                                                               & !is.na(data$ES)]),
+                           length(data$q_attrition[!is.na(data$q_attrition) 
+                                                   & !is.na(data$ES)]),
+                           length(data$q_total[!is.na(data$q_total) 
+                                                   & !is.na(data$ES)]),
+                           mod_mal_type, 
+                           mod_mal_type_spec,
+                           mod_measure,
+                           mod_measure_spec,
+                           mod_sample,
+                           mod_sample_spec,
+                           mod_sex, 
+                           mod_age,
+                           mod_followup_age,
+                           mod_interval,
+                           mod_attrition,
+                           mod_quality,
+                           mal_type_R2, 
+                           measure_R2, 
+                           sample_R2, 
+                           sex_R2, 
+                           age_R2, 
+                           followup_age_R2, 
+                           interval_R2, 
+                           attrition_R2, 
+                           quality_R2)
+  
+
+
+
+moderation_result_clean <- moderation_result %>%
+  mutate(across(everything(), ~ ifelse(. %in% c(NA, "NA"), "", .)))
+
+# Save the table as an HTML file with NA values displayed as blank spaces
+
+  kable(moderation_result_clean, row.names = FALSE,
+        col.names = c("Moderator", "k", "N", "No. ES", "r (95% CI)", "Q_mod", "p-value", "R^2"))  %>%
+    kable_styling(font_size = 11) %>%
+    add_indent(positions = c(2:8, 10:11, 13:15))
+
+
+
+
+```
+
+
+
+## Create tables with clinical moderation results 
+
+Here we create a table showing the moderation results. First we define a function to input all of the results into the table, before collating all the results and generating the table.
+
+#### Define function to make clinical subset moderation table 
+```{r}
+
+# Define function to combine effect estimates and CIs into a single cell for the table
+# Define function to combine effect estimates and CIs into a single cell for the table
+paste_res <- function(est, lowCI, upCI) {
+  mapply(function(e, l, u) {
+    if (any(is.na(c(e, l, u)))) {
+      return("")
+    } else {
+      return(paste0(format(round(e, 2), nsmall = 2), 
+                    " (", 
+                    format(round(l, 2), nsmall = 2), 
+                    "-", 
+                    format(round(u, 2), nsmall = 2), 
+                    ")"))
+    }
+  }, est, lowCI, upCI, USE.NAMES = FALSE)
+}
+
+
+## Make a function collating all the moderation results  ahead of making table
+clinical_moderation_res <- function(k_prop_diag, k_diagnosis, k_intervention,
+                           n_prop_diag, n_diagnosis, n_intervention,
+                           n_es_prop_diag, n_es_diagnosis, n_es_intervention, 
+                           mod_prop_diag,
+                           mod_mh, mod_mh_spec,
+                           mod_intervention, mod_intervention_spec,
+                           prop_diag_R2, diagnosis_R2, intervention_R2)
+                          
+ {
+ 
+  # Make variable with moderator type and level
+  mod_type <- c("Proportion diagnosis",
+                "Diagnosis",
+                "Addiction", 
+                "Bipolar",
+                "Depression",
+                "General",
+                "Personality Disorder",
+                "Psychosis", 
+                "Intervention", 
+                "Intervention",
+                "No intervention")
+  
+
+  
+ # Make variable summarising the k studies for each moderator/moderator category
+  k <- as.vector(unlist(c(k_prop_diag,
+                          NA, k_diagnosis[c(1,2,3,4,5,6),2], 
+                          NA, k_intervention[c(1,2),2])))
+
+  
+  
+  # Make variable summarising the sample size for each moderator/moderator category
+  
+  n <- as.vector(unlist(c(n_prop_diag,
+                          NA, n_diagnosis[c(1,2,3,4,5,6),2], # measure type (interview, questionnaire)
+                          NA, n_intervention[c(1,2),2])))
+
+
+  
+  # Make variable summarising the number of effect sizes for each moderator/moderator category
+  n_es <- as.vector(unlist(c(n_es_prop_diag,
+                          NA, n_es_diagnosis[c(1,2,3,4,5,6)], 
+                          NA, n_es_intervention[c(1,2)])))
+
+  
+# Make variable summarising the effect sizes for each moderator/moderator category
+ ES <- c(transf.ztor(mod_prop_diag$beta[2]),
+        NA,
+        transf.ztor(mod_mh_spec$beta[c(1,2,3,4,5,6)]), 
+        NA,
+        transf.ztor(mod_intervention_spec$beta[c(1,2)]))
+
+lowCI <- c(transf.ztor(mod_prop_diag$ci.lb[2]),
+           NA,
+           transf.ztor(mod_mh_spec$ci.lb[c(1,2,3,4,5,6)]), 
+           NA,
+           transf.ztor(mod_intervention_spec$ci.lb[c(1,2)]))
+
+upCI <- c(transf.ztor(mod_prop_diag$ci.ub[2]),
+          NA,
+          transf.ztor(mod_mh_spec$ci.ub[c(1,2,3,4,5,6)]), 
+          NA,
+          transf.ztor(mod_intervention_spec$ci.ub[c(1,2)]))
+
+ # Make variable summarising the Q_moderation statistic for each moderator
+  Q_mod <- c(mod_prop_diag$QM, #7 types of MT listed
+             mod_mh$QM,
+             NA, NA, NA, NA, NA, NA,
+             mod_intervention$QM, 
+             NA, NA)
+
+ # Make variable summarising the p-value for each moderator
+  p <- c(mod_prop_diag$QMp,
+             mod_mh$QMp,
+             NA, NA, NA, NA, NA, NA,
+             mod_intervention$QMp, 
+             NA, NA)
+  
+  # Make variable summarising R^2 
+  
+ R2 <- c(prop_diag_R2,
+             diagnosis_R2,
+             NA, NA, NA, NA, NA, NA,
+             intervention_R2, 
+             NA, NA)
+
+
+# Collate results into dataframe
+  mod <- as.data.frame(cbind(mod_type, k, n, n_es,
+                             format(round(ES, 2), nsmall=2), 
+                                       format(round(lowCI, 2), nsmall=2), 
+                                       format(round(upCI, 2), nsmall=2),
+                                       format(round(Q_mod, 2), nsmall=2),
+                                       format(round(p, 3), nsmall=3), 
+                                       format(round(R2, 2), nsmall=2)))
+
+colnames(mod) <- c("Moderator", "k","n", "n_es", "OR", "Low_CI", "Up_CI", "Q_mod", "p_value", "R^2")
+
+
+    ## Convert variables to numeric
+  cols.num <- c( "n", "OR", "Low_CI", "Up_CI", "Q_mod", "p_value", "R^2")
+  mod[cols.num] <- sapply(mod[cols.num],as.numeric)
+  
+  ## Create new variable with OR and CIs pasted into one
+  mod$ES_CI <- paste_res(mod$OR, mod$Low_CI, mod$Up_CI)
+  
+  # Condense table
+  mod_table_clinical <- subset(mod, select=c("Moderator", "k", "n", "n_es", "ES_CI", "Q_mod", "p_value", "R^2"))
+  
+  
+   return(mod_table_clinical)
+}
+
+
+```
+
+```{r, results='asis'}
+options(knitr.kable.NA = '') # ensure kable does not print NAs 
+## Make moderation table for clinical subset
+clinical_moderation_result <- clinical_moderation_res(k_prop_diag, k_diagnosis, k_intervention, 
+                           n_prop_diag, n_diagnosis, n_intervention,
+                           length(data_MH$proportion_diagnosis[!is.na(data_MH$ES)]),
+                           table(data_MH$sample_mh[!is.na(data_MH$ES)]),
+                           table(data_MH$sample_intervention[!is.na(data_MH$ES)]),
+                           mod_prop_diag, 
+                           mod_mh,
+                           mod_mh_spec,
+                           mod_intervention,
+                           mod_intervention_spec,
+                           prop_diag_R2, 
+                           diagnosis_R2, 
+                           intervention_R2)
+  
+
+
+clinical_moderation_result_clean <- clinical_moderation_result %>%
+  mutate(across(everything(), ~ ifelse(is.na(.), "", .))) ##format to get rid of NA's
+
+
+
+# Save the table as an HTML file with NA values displayed as blank spaces
+
+  kable(clinical_moderation_result_clean, row.names = FALSE,
+        col.names = c("Moderator", "k", "N", "No. ES", "r (95% CI)", "Q_mod", "p-value", "R^2"))  %>%
+    kable_styling(font_size = 11) %>%
+    add_indent(positions = c(3:8, 10:11))
+
+
+
+```
+
+
+
+## Sensitivity analysis 
+
+Here we will conduct three sensitivity analysis
+* restricting the analysis to studies where follow up time interval is over 6 months
+* excluding studies with participants under 18 which are unclear about whether exactly the same time frame is being measured 
+* exclude studies where tetrachoric correlations were estimated by the calibration model 
+
+### excluding studies with follow up intervals less than 6 months
+
+```{r}
+
+range(data$followup_interval)
+
+data$six_months <- cut(data$followup_interval, 
+                             breaks = c(0, 26, 624),
+                             labels = c("under 6 months", "6 months & over"),  # Labels
+                      right = FALSE)
+
+
+data_6_months <- data %>% filter(six_months == "6 months & over")
+
+
+res_6_months <- rma.mv(yi, vi, random=list(~ 1 | es_id, ~ 1 | ref), data=data_6_months)
+
+transf.ztor(res_6_months$beta)
+transf.ztor(res_6_months$ci.lb)
+transf.ztor(res_6_months$ci.ub)
+
+```
+
+### Excluding studies with unclear time comparison
+```{r}
+
+data_excl <- subset(data, !(author %in% c("Breton", "Park")))
+
+res_excl <- rma.mv(yi, vi, random=list(~ 1 | es_id, ~ 1 | ref), data=data_excl)
+
+transf.ztor(res_excl$beta)
+transf.ztor(res_excl$ci.lb)
+transf.ztor(res_excl$ci.ub)
+
+# moderation by baseline age - repeat for sensitivity analysis
+
+mod_age_excl <- rma.mv(yi, vi,  
+                               random=list(~ 1 | es_id, ~ 1 | ref), 
+                               mods=~baseline_age_binary,
+                               data=data_excl)
+
+mod_age_excl_spec <- rma.mv(yi, vi,  
+                                    random=list(~ 1 | es_id, ~ 1 | ref), 
+                                    mods=~baseline_age_binary-1,
+                                    data=data_excl)
+
+transf.ztor(mod_age_excl_spec$beta)
+transf.ztor(mod_age_excl_spec$ci.lb)
+transf.ztor(mod_age_excl_spec$ci.ub)
+
+# extract k studies with binary age
+k_age_bin_excl <- data_excl %>% 
+  filter(!is.na(ES) & !is.na(baseline_age_binary)) %>%
+  dplyr::count(ref, baseline_age_binary) %>%
+  dplyr::group_by(baseline_age_binary) %>% dplyr::count(baseline_age_binary)
+# extract total sample size for each age bin
+n_age_bin_excl <- data_excl %>%  
+  dplyr::filter(!is.na(baseline_age_binary) & !is.na(ES)) %>%
+  group_by(baseline_age_binary, cohort) %>% 
+  dplyr::count(followup_n) %>%  
+  dplyr::summarise(m = max(followup_n)) %>%  print(n=100)%>% 
+  dplyr::summarise(n = sum(m)) 
+
+table(data_excl$baseline_age_binary)
+
+tau2_mod_age_excl <- sum(mod_age_excl$sigma2)
+
+R2 <- (tau2_res - tau2_mod_age_excl) / tau2_res
+
+age_excl_R2 <- R2 *100
+age_excl_R2
+
+# interaction by baseline age & follow up interval - repeat for sensitivity analysis 
+mod_age_interval_excl <- rma.mv(yi, vi,  
+                               random=list(~ 1 | es_id, ~ 1 | ref), 
+                               mods=~baseline_age_binary + followup_interval + baseline_age_binary*followup_interval,
+                               data=data_excl)
+
+summary(mod_age_interval_excl)
+
+tau2_mod_age_interval_excl <- sum(mod_age_interval_excl$sigma2)
+
+R2 <- (tau2_res - tau2_mod_age_interval_excl) / tau2_res
+
+age_interval_excl_R2 <- R2 *100
+age_interval_excl_R2
+
+#plot 
+
+# Create new data grid for prediction
+new_data1 <- expand.grid(
+  baseline_age_binary = c(0, 1),           # 0 = Age ≤ 18, 1 = Age > 18
+  followup_interval = 1:261                # Follow-up interval in weeks (up to 5 years)
+)
+
+# Generate predictor matrix (drop intercept)
+X <- model.matrix(
+  ~ baseline_age_binary + followup_interval + baseline_age_binary * followup_interval,
+  data = new_data1
+)[, -1]
+
+# Predict from interaction model NOTE: still on z-scale
+preds <- predict(mod_age_interval_excl, newmods = X)
+
+# Add predicted values. Also transform to correlation scale before plotting 
+new_data1 <- new_data1 %>%
+  mutate(
+    correlation = transf.ztor(preds$pred),
+    ci_lower = transf.ztor(preds$ci.lb),
+    ci_upper = transf.ztor(preds$ci.ub),
+    age_group = ifelse(baseline_age_binary == 0, "Age ≤ 18", "Age > 18")
+  )
+
+#plot (remove hashtag to save)
+
+#png("age_interval_predicted_continuous_ecl_breton&park.png", width = 800, height = 600)
+
+ggplot(new_data1, aes(x = followup_interval, y = correlation, color = age_group, fill = age_group)) +
+  geom_ribbon(aes(ymin = ci_lower, ymax = ci_upper), alpha = 0.2) +  # Shaded CI bands
+  geom_line(size = 1) +  # Predicted correlation lines
+  scale_y_continuous(limits = c(-0, 1)) +
+  scale_color_manual(
+    values = c("Age > 18" = "mediumpurple3", "Age ≤ 18" = "palegreen3")
+  ) +
+  scale_fill_manual(
+    values = c("Age > 18" = "mediumpurple3", "Age ≤ 18" = "palegreen3")
+  ) +
+  labs(
+    x = "Follow-up Interval (weeks)",
+    y = "Predicted Test-Retest Correlation",
+    color = "Baseline Age Group",
+    fill = "Baseline Age Group"
+  ) +
+  theme_minimal(base_size=15)
+
+
+
+#dev.off()
+
+```
+
+### Excluding tetrachoric estimates
+
+```{r}
+
+table(data$tetrachoric_source)
+
+# exclude studies where we predicted tetrachoric correlations from calibration model 
+
+data_subset <- subset(data, !(tetrachoric_source %in% c("predicted")))
+
+res <- rma.mv(yi, vi, random=list(~ 1 | es_id, ~ 1 | ref), data=data_subset)
+
+predict(res, transf=transf.ztor, digits=2)
+
+# Calculate I2 statistic
+#see: https://www.metafor-project.org/doku.php/tips:i2_multilevel_multivariate 
+# Create the weight matrix W
+W <- diag(1/data_subset$vi[!is.na(data_subset$yi) & !is.na(data_subset$vi)])
+
+# Create the model matrix X
+X <- model.matrix(res)
+
+# Calculate the projection matrix P
+P <- W - W %*% X %*% solve(t(X) %*% W %*% X) %*% t(X) %*% W
+
+# Calculate the I² statistic
+I2 <- 100 * sum(res$sigma2) / (sum(res$sigma2) + 
+                                           (res$k - res$p) / sum(diag(P)))
+
+# Round the I² statistic to 2 decimal places
+round(I2, 2)
+
+```
